@@ -1,0 +1,1266 @@
+---
+title: "Graduates Admission Prediction following a Bayesian approach"
+author: "Leonardo Iania, Jacopo Signò"
+output:
+  pdf_document: default
+  html_document:
+    theme: paper
+    highlight: kate
+    number_sections: yes
+    code_folding: hide 
+    pages: 
+      markdown: 
+        extra: true
+---
+
+```{r init, include=FALSE}
+#setwd("G:\\Il mio Drive\\Prog_Bayes_Cloud")
+#setwd("G:/.shortcut-targets-by-id/1aahmVfzubSDCW9Fq2_0qQB7nwKdzVFye/Prog_Bayes_Cloud")
+
+library(R2jags)
+library(esquisse)
+library(tidyverse)
+library(ggplot2)
+library(corrplot)
+library(ggcorrplot)
+library(gridExtra)
+library(reshape2)
+library(moments)
+library(ggpmisc)
+library(modeest)
+library(knitr)
+library(kableExtra)
+
+```
+
+```{r setup, include=FALSE}
+# creare un junk -> ctrl+alt+i
+knitr::opts_chunk$set(echo = TRUE)
+#knitr::read_chunk("logist_JAGS_main.R")
+library(broom)
+library(kableExtra)
+```
+
+
+# Introduction
+<p style="text-align: justify;">
+
+This report summarizes the statistical modeling and analysis results we obtained performing a Bayesian analysis on a [dataset](https://www.kaggle.com/datasets/mukeshmanral/graduates-admission-prediction) collecting the main parameters which are considered during application for Masters Programs.
+
+The goal of our analysis has been to fit a model capable to predict the probability of admission for the students, and to understand what are the parameters that affect the most the probability of being accepted.
+
+</p>
+
+# About the Data
+
+Our Dataset contains information about 500 indian students, for each of them we have seven important parameters usually considered during application for the Master Program and a response variable varying between {0,1}, that describes the chance of admission. 
+
+A first view of the dataset:
+
+```{r dataset, echo= FALSE}
+#Preparing the data
+data <- read.csv("admission_data.csv")
+
+data[1:7,] %>% 
+kbl( row.names = TRUE, centering = TRUE, align = 
+       c('c','c','c','c','c','c','c','c'))%>%
+  kable_paper("hover", full_width = F)
+
+data = data%>%
+  rename(Uni.Rating = University.Rating)%>%
+  mutate(Chance.of.Admit =  if_else(Chance.of.Admit > 0.72, 1, 0) )%>%
+  rename(y=Chance.of.Admit)
+
+data$Uni.Rating<-factor(data$Uni.Rating)
+
+# ---- Split train-test ----
+n<-nrow(data)
+
+set.seed(17)
+idx_train<-sample(1:n,0.75*n)
+
+x_train<-data[idx_train,-8]
+y_train<-data[idx_train,8]
+
+x_test<-data[-idx_train,-8]
+y_test<-data[-idx_train,8]
+
+X.tmp = as.data.frame(x_train)
+X.tmp = model.matrix(y_train ~., X.tmp)
+X = X.tmp
+
+p=ncol(X)
+```
+
+
+
+Let's explore our data:
+
+**GRE and TOEFL scores**
+
+GRE is a widely used test in U.S.A (but also in other countries) for admission in Master's programs.
+It measure verbal reasoning, quantitative reasoning, analytical writing, and critical thinking, by testing algebra, geometry, arithmetic, and vocabulary knowledge.
+
+In general, the minimum and the maximum points that a student can obtain are, respectively, 260 and 340.
+
+
+The TOEFL, instead, measures the English language ability of non-native speakers.
+Its range goes from 0 to 120.
+
+
+```{r GRE-TOEFL, message=FALSE, warning=FALSE}
+
+alo<-summary(data$GRE.Score)
+summ<-matrix(alo,1,6)
+
+summ <- data.frame(summ)
+colnames(summ)<-c("Min","1st Qu","Median","Mean","3rd Qu","Max")
+
+p1 <- ggplot(data) + 
+  geom_histogram(bins =12,aes(x = data[,1],fill=""),show.legend = F) + 
+  labs(title="GRE Score",x=" ") +
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  theme(axis.title.x = element_text(margin=margin(t=20)))+  
+  scale_fill_manual(values="#756523")
+
+  
+
+hist_G<-p1+geom_table_npc(data = summ, label = list(summ),npcx = 0.00, npcy = -1, hjust = 0, vjust = 1.5,table.theme = ttheme_gtbw(base_size = 8,colhead = list(bg_params = list(fill = "#caae3c"))))
+
+
+
+
+alo<-summary(data$TOEFL.Score)
+summ<-matrix(alo,1,6)
+
+summ <- data.frame(summ)
+colnames(summ)<-c("Min","1st Qu","Median","Mean","3rd Qu","Max")
+
+p2 <- ggplot(data) + 
+  geom_histogram(bins =12,aes(x = data[,2],fill=""),show.legend = F) +  
+  labs(title="TOEFL Score",x=" ") +
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  theme(axis.title.x = element_text(margin=margin(t=20))) + 
+  scale_fill_manual(values="#756523")
+  
+
+hist_T<-p2+geom_table_npc(data = summ, label = list(summ),npcx = 0.00, npcy = -1,size = 1.8, hjust = 0, vjust = 1.5,table.theme = ttheme_gtbw(base_size = 8,colhead = list(bg_params = list(fill = "#caae3c"))))
+
+grid.arrange(hist_G,hist_T,ncol=2)
+```
+
+**University Rating**
+
+This is a categorical variable which indicates the rank of the university the student comes from. It will be split in dummy variables when implementing the model.
+
+```{r uni rating, message=FALSE, warning=FALSE}
+library(wesanderson)
+l<-ggplot(data,aes(x = Uni.Rating,fill=as.factor(Uni.Rating))) + geom_bar(show.legend = FALSE) + xlab("University Rating") + ylab(" ")+scale_fill_manual(values=wes_palette(n=5, name="Chevalier1",type="continuous"))
+l
+  
+```
+
+**Statement of Purpose and Letter of Recommendation**
+
+To evaluate SOP and LOR of each student, they are given a rating from 1 to 5 in steps of 0.5, which indicates the "strength". 
+
+```{r SOP and LOR, message=FALSE, warning=FALSE}
+
+sop<-ggplot(data,aes(x = SOP,fill="")) + geom_bar(show.legend = FALSE) + 
+  scale_fill_manual(values="#193e82")+labs(title="SOP",x=" ",y="")+ 
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+lor<-ggplot(data,aes(x = LOR,fill="")) + geom_bar(show.legend = FALSE) + 
+  scale_fill_manual(values="#826819")+labs(title="LOR",x=" ",y="")+ 
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+grid.arrange(sop,lor,ncol=2)
+
+```
+
+
+**CGPA**
+
+The CGPA indicates the Cumulative Grade Point Average of each student at university at the moment of the application for Master's program.
+
+```{r CGPA, message=FALSE, warning=FALSE}
+
+alo<-summary(data$CGPA)
+summ<-matrix(alo,1,6)
+
+summ <- data.frame(summ)
+colnames(summ)<-c("Min","1st Qu","Median","Mean","3rd Qu","Max")
+
+p2 <- ggplot(data,aes(x = CGPA,fill="")) + 
+  geom_histogram(bins =12,show.legend = F) + 
+  labs(title="CGPA",x="
+       
+       ") + 
+  theme_light() + theme(plot.title = element_text(hjust = 0.5)) + 
+  scale_fill_manual(values="#193e82") +
+  theme(axis.title.x = element_text(margin=margin(t=1)))
+  
+
+hist_T<-p2+geom_table_npc(data = summ, label = list(summ),npcx = 0.00, npcy = -1, hjust = -0.5, vjust = 1.5,table.theme = ttheme_gtbw(colhead = list(bg_params = list(fill = "#2b809e"))))
+
+hist_T
+```
+
+
+**Research**
+
+A simple dummy variable which indicates whether the student already did research or not.
+
+
+
+**Correlation Matrix**
+
+```{r corrplot}
+
+#Correlation matrix
+datax<-read.csv("admission_data.csv")
+correlation_matrix <- cor(datax[,-8]) # Compute the correlation matrix cor(X,Y) = cov(X,Y) / (sd(X)*sd(Y))
+corrplot(correlation_matrix, tl.cex = 0.85, method = "color",type="upper")
+```
+
+
+
+ <font size="4"> **Our approach** </font> 
+
+
+We decided to implement 2 different models:
+
+1) Logistic regression model
+2) Beta regression model 
+ 
+ 
+# Logistic regression
+
+We assumed our response variable Y as binary, $Y \in \left \{ 0,1 \right \}$ by transforming the Chance of admission:
+
+$$y_{i}=\left\{\begin{array}{lll}
+1 & \text { if } &  \text { Chance of admit > 0.72 } \\
+0 & \text { if } &  \text { Chance of admit} \leq \text{0.72 }
+\end{array}\right.$$
+And we interpret 1 as *high change of admission* and 0 as *low chance of admission*
+
+We can now assume:
+
+$$ Y_i|\pi_i \stackrel{ind.}{\sim} Ber(\pi_i) \quad i=1,....,n $$
+Now the aim is to model the effect of predictors on $\pi_i$, but we can't do it directly because then we would have a problem with negative and above 1 probabilities. So we will model $\eta = g(\pi)$, where $g(.)$ is a *link function*, such that $0 \leq h(\eta) \le 1$.
+
+$$\eta = g(\pi) = \beta_0 + \beta_1x_1+...+\beta_qx_q$$
+
+In our case we decided to use a logit link function 
+$$logit(\pi_i) = log(\frac{\pi_i}{1-\pi_i}) = \beta^Tx_i$$
+and so
+
+$$\pi_{i} = h\left(\boldsymbol{\beta}^{\top} \boldsymbol{x}_{i}\right)=\frac{e^{\boldsymbol{\beta}^{\top} \boldsymbol{x}_{i}}}{1+e^{\boldsymbol{\beta}^{\top} \boldsymbol{x}_{i}}} $$
+Under $Y_i|\pi_i \stackrel{ind.}{\sim} Ber(\pi_i) \quad i=1,....,n$, the **Likelihood** is
+
+\begin{aligned}
+p(\boldsymbol{y} \mid \boldsymbol{\beta}) &=\prod_{i=1}^{n} p\left(y_{i} \mid \pi_{i}\right) \\
+&=\prod_{i=1}^{n} \pi_{i}^{y_{i}}\left(1-\pi_{i}\right)^{1-y_{i}} \\
+&=\prod_{i=1}^{n} h\left(\boldsymbol{\beta}^{\top} \boldsymbol{x}_{i}\right)^{y_{i}}\left(1-h\left(\boldsymbol{\beta}^{\top} \boldsymbol{x}_{i}\right)\right)^{1-y_{i}}
+\end{aligned}
+
+And the *priors* on $\boldsymbol{\beta} = (\beta_1,.....,\beta_p)^T$ are:
+$$\beta_j \stackrel{ind.}{\sim} N(\beta_{0j}, \sigma^2_{0j}) $$
+Since the prior is not conjugate neither semiconjugate, to approximate the posterior 
+$p(\boldsymbol{\beta} \mid \boldsymbol{y}) \propto p(\boldsymbol{y} \mid \boldsymbol{\beta}) p(\boldsymbol{\beta})$ we need a Metropolis Hastings algorithm. 
+
+To implement the Metropolis Hastings algorithm we use *JAGS*, a program for analysis of Bayesian  models using Markov Chain Monte Carlo (MCMC) simulation, that 
+easily allows us to implement Gibbs sampler and Metropolis Hastings algorithms.
+
+In the following code, with the help of JAGS, we perform a Metropolis Hastings with 5000 iteration, no *burnin period* and *thinning* equal to 1.
+
+```{r message=FALSE, warning=FALSE, out.extra= FALSE,results='hide',message='hide'}
+jags_data = with(data, list(y = y_train, X = X, n = length(y_train), p = ncol(X)))
+
+
+logistic_regr_jags = function(){
+  # Likelihood:
+  for(i in 1:n){
+    y[i] ~ dbern(pi[i])
+    logit(pi[i]) = beta%*%X[i,]
+    }
+  
+  # Priors:
+  for(j in 1:p){
+    beta[j] ~ dnorm(0, 0.01) # Remember, JAGS uses the precision: 0.01 is 1/variance
+  }
+}
+
+# Initial values 
+init_values = function(){
+  
+  list(beta = rep(0,p))
+}
+
+
+# Parameter of interest for posterior inference
+params = c("beta")
+
+# JAGS function
+jags_posterior = jags(data = jags_data,
+                      inits = init_values,
+                      parameters.to.save = params,
+                      model.file = logistic_regr_jags,
+                      n.chains = 1,
+                      n.iter = 5000,
+                      n.burnin = 0,
+                      n.thin = 1,
+                      quiet=T,
+                      progress.bar = "none")
+
+
+out<-jags_posterior$BUGSoutput
+
+beta_post_JAGS<-out$sims.list$beta
+
+
+```
+
+As output we obtain a [5000 x 11] matrix, where the columns corresponds to our $\beta$ coefficients, and each row is the output of an iteration of the Metropolis Hastings, *i.e.* $\boldsymbol{{\beta}}^{s}$
+
+
+## MCMC diagnostic 
+
+MCMC is a numerical technique and hence subject to *approximation* error. For this reason before using the output that we obtained for posterior inference on $\boldsymbol{\beta}$, we need to be "sure" that the resulting chain provide an appropriate approximation of the true posteriors distributions.
+
+### Trace plot 
+
+The trace  plots provide a graphical representation of the Markov chain for $\theta_j$ for s = 1,....,S.
+
+The chain should be concentrated within a region of high posterior probability centered around the mode of $p(\theta|\boldsymbol{y})$
+
+```{r}
+
+lbs <- vector()
+for(i in 1:p) {lbs <- append(lbs, parse(text=(paste0("beta[",i,"]"))))} # vector with all parameters and a subscript that varies from 0 to p=11
+
+beta_tp_list<-list() # list in which plots will be saved in the for loop
+
+betadf_log<-data.frame(beta_post_JAGS)
+
+par(mfrow=c(3,2),mar = c(3,5,1,1))
+for (i in 1:6){
+plot(beta_post_JAGS[,i], ylab = lbs[i], xlab = "s", type = "l",col="#30609C")}
+```
+```{r}
+par(mfrow=c(3,2),mar = c(3,5,1,1))
+for (i in 7:11){
+plot(beta_post_JAGS[,i], ylab = lbs[i], xlab = "s", type = "l",col="#30609C")}
+```
+
+
+
+### Autocorrelation 
+
+```{r}
+par(mfrow=c(3,2),mar = c(3,5,1,1))
+for(i in 1:6){
+ acf(beta_post_JAGS[,i],ylab =lbs[i], xlab = "lag", main = "")
+}
+
+par(mfrow=c(3,2),mar = c(3,5,1,1))
+for(i in 7:11){
+ acf(beta_post_JAGS[,i],ylab=lbs[i], xlab = "lag", main = "")
+}
+
+```
+
+### Geweke test
+
+The idea behind the Geweke test is: *if the chain has reached convergence then statistics computed from different portions of the chian should be similar*
+
+Considering two portions of the chain:
+
+* $\boldsymbol\theta_I$ : the initial 10% of the chain (with size $n_I$)
+* $\boldsymbol\theta_L$ : the last 50% of the chain (with size $n_L$)
+
+The Geweke statistics is 
+
+<p align = "center">
+$Z_{n}=\frac{\bar{\theta}_{I}-\bar{\theta}_{L}}{\sqrt{\hat{s}_{I}^{2}+\hat{s}_{L}^{2}}} \rightarrow \mathcal{N}(0,1) \quad \text { as } \quad n \rightarrow \infty$
+</p>
+Where *n* is the sum of the size of the 2 portion that we selected for the test and $\hat{s}_{I}^{2}$ and $\hat{s}_{I}^{2}$ are their sample variance.
+ 
+Large absolute values of the Geweke Statistics lead us to reject the hypothesis of stationarity.
+ 
+```{r}
+gewz_l<-geweke.diag(beta_post_JAGS)$z
+beta_names<-NULL
+for(i in 1:p){
+  beta_names[i]<-paste("$\\beta_{",i,"}$")
+}
+
+gewz_l<-round(as.numeric(gewz_l),2)
+
+kable(t(gewz_l),col.names = beta_names,booktabs = TRUE) %>% 
+  kable_styling(font_size=12)
+
+
+
+```
+
+As we can see from the output, in our case the test does not suggest problems in our chain.
+
+
+### Effective Sample Size(ESS)
+
+Rather than a test, is a value that quantifies the reduction in the effective number of draws, due to the correlation in the chain.
+
+$$ ESS = \frac{G}{1+2s\sum_{g=1} acf_g}$$
+
+
+
+```{r}
+tabess<-as.numeric(effectiveSize(beta_post_JAGS))
+tabess<-round(tabess,1)
+
+
+kable(t(tabess),col.names = beta_names,booktabs = TRUE) %>% 
+  kable_styling(font_size=12)
+```
+
+
+
+
+
+Both graphical and formal tests for MCMC convergence lead us to conclude that the Markov chain that we generated provide a good aproximation of the true posterior distribution of the beta regressors.
+
+We can then state that each column of the output matrix `beta_post_JAGS` will then approximate the posterior distribution of the relative $\beta_j$ and we can see how their values are distributed with a boxplot:
+```{r message=FALSE, warning=FALSE}
+m1<-melt(betadf_log[,-1],id.vars=1)
+
+int_boxplot<-ggplot(betadf_log,aes(y = betadf_log[,1])) + 
+  geom_boxplot() + labs(x=lbs[1],y="")  + ylim(-40,0) + theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank())
+
+other_boxplot<-ggplot(m1,aes(x = variable,y = value)) + 
+  geom_boxplot() + 
+  scale_x_discrete(labels=lbs[2:11]) + labs(x="",y="") +
+  geom_hline(yintercept = 0,col="#30609C")
+
+grid.arrange(int_boxplot,other_boxplot,ncol=2,widths=1:2)
+```
+
+
+## Predictions 
+
+Now we want to use our model on "new" observations, and see if it is able to predict whether a student will be admitted or not.
+
+As new observations we consider the `x_star` data frame, that we created at the beginning by splitting the original dataset in train and test. It contains 125 new observations: $\boldsymbol{x}^*_j =(x_{j,1}^*),....,(x_{j,11}^*)$ for $j = 1,...,125$
+
+
+With the posterior distribution of $\boldsymbol{\beta} = (\boldsymbol\beta_1,.....,\boldsymbol\beta_p)^T$, that we approximated previously, what we are going to do is: 
+
+For i = 1,...S:
+
+*    For j = 1,....,J:
+     1. Compute $\eta_j ^{(s)} = \boldsymbol\beta^{(s)T}\boldsymbol{x}^*_j$
+     2. Compute $\pi_j ^{(s)} = h(\boldsymbol\beta^{(s)T}\boldsymbol{x}^*_j)$
+```{r}
+X.tmp_test <- as.data.frame(x_test)
+
+X.tmp_test <- model.matrix(y_test ~., X.tmp_test)
+
+x_star<-X.tmp_test
+ni<-as.matrix(beta_post_JAGS)%*%t(x_star) #5000 x 125
+pi<-exp(ni)/(1+exp(ni)) #5000 x 125 #--> for each of the 125 obs i have 5000 predicted pi
+
+
+
+
+```
+Now, for each new observation, we have 5000 values for $\pi_j^{s}$, so we can sample from 5000 bernoulli whit them as parameter and obtain the predictive posterior distribution for each student. And from that we consider the "fitted" values of $y_i^*$ as the mode of the distribution of each new observation.
+
+We do this since in bayesian statistics, when you perform prediction you don't obtain a signle predictive value, but instead a *posterior predictive distribution*. But to be able to evaluate our predictions comparing them with the true values, we need a single point estimate, and to do this we decide to use the mode of our posterior distribtuions. 
+
+```{r}
+#here we generate 5000 bernoulli for each of 125 obs, and then we do the mode to decide if 
+# the obs is 0 or 1
+#Function the obtain the mode of v
+getmode <- function(v){
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+post_tab = matrix(NA, nrow = 5000, ncol = 125)
+for(i in 1:nrow(post_tab)){
+  for(j in 1:ncol(post_tab)){
+    post_tab[i,j] = rbernoulli(1,pi[i,j])
+  }
+}
+
+post_mod = apply(post_tab, 2, getmode)
+post_mod = ifelse(post_mod == TRUE, 1,  0)
+```
+
+We can compare what we've obtained with the observed value from `y_test`
+
+**Confusion matrix**
+```{r warning=FALSE}
+confmat<-table(post_mod,y_test)
+library(cvms)
+library(tibble)
+cfm <- as_tibble(confmat)
+acc = (confmat[1,1]+confmat[2,2])/length(y_test)
+
+plot_confusion_matrix(cfm, 
+                      target_col = "post_mod", 
+                      prediction_col = "y_test",
+                      counts_col = "n")
+```
+
+Watching at the confusion matrix we can see that we obtain:
+ 
+* Overall accuracy $\approx83\%$
+* Sensitivity: $\approx84\%$
+* Specificity: $\approx83\%$
+
+These are already excellent results, but let’s see if we can still improve them with a varible selction procedure.
+
+## Spike & Slab Variable Selection
+
+To perform variable selection we introduce a (p,1) binary vector $\boldsymbol\gamma = (\gamma_1,....,\gamma_p)^T$ such that
+
+$\gamma_{j}=\left\{\begin{array}{lll}
+1 & \text { if } & X_{j} \text { is included in the model } \\
+0 & \text { if } & X_{j} \text { is not included in the model }
+\end{array}\right.$
+
+
+So we have that $\gamma_j$ "controls" the inclusion of $X_j$ in the model, and we treat $\boldsymbol\gamma$ as a *parameter*. We then write  
+
+$$\boldsymbol\eta = h(\gamma_1\beta_1X_1+....+\gamma_p\beta_pX_p)$$
+ and we assign a prior both on $\boldsymbol\gamma$ and $\boldsymbol\beta$:
+ $$\gamma_j \stackrel{i.i.d.}{\sim} Bern(w) \quad\quad\quad \beta_j \stackrel{ind.}{\sim}N(\beta_{0j, \sigma^2_{0j}})$$
+
+The resulting joint prior is $p(\beta_j,\gamma_j)=(1-w)\lambda_0 + wdN(\beta_j|\beta_{0j},\sigma^2_{0j})$ and it's called **spike and slab prior**.
+
+We also assigned a prior to $w \in (0,1)$ as $w \stackrel{}{\sim}Beta(a,b)$.
+In our case we decide to set hypermarametrs a = b = 1, so that  $w \stackrel{}{\sim}Unif(0,1)$ and $E(w) = 0.5$, to avoid to favours simpler/complex models.
+
+Also in this case JAGS will help use to find the posterior distribution for $\boldsymbol\beta \quad$ and $\quad \boldsymbol\gamma$ :
+
+```{r}
+# ---- Variable Selection ----
+
+
+jags_data = with(data, list(y = y_train, X = X, n = length(y_train), p = ncol(X)))
+
+# Likelihood and priors
+logistic_regr_jags_ss = function(){
+  
+  # Likelihood:
+  for(i in 1:n){
+    y[i] ~ dbern(pi[i])
+    
+    logit(pi[i]) = (gamma*beta)%*%X[i,]
+  }
+  
+  # Priors:
+  for(j in 1:p){
+    beta[j] ~ dnorm(0, 0.01) # Remember, JAGS uses the precision: 0.01 is 1/variance
+  }
+  
+  for(j in 1:p){
+    gamma[j] ~ dbern(w)
+  }
+  
+  w ~ dbeta(1, 1)
+}
+
+# Initial values 
+init_values_ss = function(){
+  list(beta = rep(0, p), gamma = rep(1, p))
+}
+
+# Parameter of interest for posterior inference
+params_ss = c("beta", "gamma")
+
+# JAGS function
+jags_posterior = jags(data = jags_data,
+                      inits = init_values_ss,
+                      parameters.to.save = params_ss,
+                      model.file = logistic_regr_jags_ss,
+                      n.chains = 1,
+                      n.iter = 5000,
+                      n.burnin = 0,
+                      quiet=T,
+                      progress.bar = "none",
+                      n.thin = 1)
+
+
+out_ss = jags_posterior$BUGSoutput
+
+
+gamma_ss<-out_ss$sims.list$gamma
+beta_ss<-out_ss$sims.list$beta
+```
+
+
+Notice that: 
+
+* if $\gamma_{j}^{(s)} = 0$ then implicitly $\beta_{j}^s = 0$ and so the predictor $X_j$ is not included in the model at time s
+* if $\gamma_{j}^{(s)} = 1$ then  the predictor $X_j$ is  included in the model at time s with coefficients $\beta_{j}^s$
+
+Therefore, we can use the frequency of $\gamma_j^{(s)} = 1 \quad for \quad s=1,...S$ to estimate $\hat{p}X_j$  *i.e* the **posterior probability of inclusion** of predictor $X_j$. Basically, for each predictor we count the number of times that $\gamma_j$ is = 1 over the S draws.
+
+Formally: $$\hat{p}X_j = \frac{1}{S}\sum_{s=1}^{S} \gamma_{j}^{(s)} $$
+
+```{r}
+
+prob_inclusion= colMeans(gamma_ss)
+
+param_names= c("Intercept","GRE","TOEFL","Uni 2","Uni 3","Uni 4","Uni 5","SOP","LOR","CGPA","Research")
+
+incldf<-data.frame(nam=param_names,probs=prob_inclusion)
+
+ggplot(data=incldf,aes(x=factor(nam,level=param_names),y=probs,fill=""))+
+  geom_bar(stat="identity",show.legend = F) + 
+  labs(x=" ",y=expression(hat(p)[j])) +
+  scale_fill_manual(values=c("#30609C"))
+
+```
+
+And this is what we obtained.
+
+**How can we use this kind of results to do predictions?**
+
+### Bayesian Model Averaging (BMA)
+
+The idea: Instead of selecting one single model, we use all the models generated with the spike and slab, and then compute a prediction of y which is averaged with respect to all these models.
+
+We can use the posterior model probabilities to *weight* prediction obtained under each of the $M_k$ model. 
+
+First we compute the predictive distribution for all of our S model 
+$$\begin{aligned}
+p\left(y^{} \mid y_{1}, \ldots, y_{n}, \mathcal{M_s}\right) &=\int p\left(y^{} \mid \boldsymbol{\beta}, \mathcal{M_s}\right) \cdot p\left(\boldsymbol{\beta} \mid \mathcal{M_s}, y_{1}, \ldots, y_{n}\right) d \boldsymbol{\beta} \\
+&=\int \text { Sampling distribution at } y^{*} \cdot \text { Posterior of } \boldsymbol{\beta} d \boldsymbol{\beta}
+\end{aligned} $$
+and now we use all these predictive distribution to obtain one last average predictive distribution for our individuals.
+
+This approach is called **Bayesian Model averaging**
+
+
+$$p\left(y^{*} \mid y_{1}, \ldots, y_{n}\right)=\sum_{k=1}^{K} p\left(y^{*} \mid y_{1}, \ldots, y_{n}, \mathcal{M}_{k}\right) p\left(\mathcal{M}_{k} \mid y_{1}, \ldots, y_{n}\right) \quad (1)$$
+
+In general, this requires the computation of posterior model probabilities, but since we are dealing with GLMs, we are not able to compute the posterior model probability, so we need to find a way to approximate (1).
+
+At each iteration we have:
+
+* $\boldsymbol\beta^{(s)} = (\beta_1^{s},....,\beta_p^{(s)})$
+* $\boldsymbol\gamma^{(s)} = (\gamma_1^{s},....,\gamma_p^{(s)})$
+
+and we can think to $\boldsymbol\gamma^{(s)}$ as a draw from the posterior $p\left(\mathcal{M}_{k} \mid y_{1}, \ldots, y_{n}\right)$.
+This means that we can approximate the *posterior predictive* distribution of Y*, for a new subject $\boldsymbol{x^*} = (x_1^*,....,x_p^*)^T$ in this way:
+
+For s = 1,....,S 
+
+1. Compute $\eta^{s} = \gamma_1^{(s)}\beta_1^{(s)}x_1^* + ..... +\gamma_p^{(s)}\beta_p^{(s)}x_p^*$ (basically we are computing a linear predictor under a different model)
+2. Compute $\pi^{(s)} = h(\eta^{(s)})$
+3. Draw $y^{*(s)}$ from $p(y*|\pi^{(s)})$ 
+
+And eventually the output ${y^{*(1)},.....,y^{*(S)}}$ is a *BMA sample from the predictive distribution of Y for subject i*.
+
+In our case we repeat this procedure J times, where J is the number of new observation $\boldsymbol{x}^*$ 
+
+Let's implement the BMA in R
+
+```{r}
+S = 5000
+eta_post = matrix(NA,5000,125)
+pi_post = matrix(NA,5000,125)
+post_tab_2 = matrix(NA,5000,125)
+for(k in 1:125){
+  for(s in 1:S){
+    eta_post[s,k] = (gamma_ss[s,]*beta_ss[s,])%*%x_star[k,]
+    pi_post[s,k] =exp(eta_post[s,k])/(1+exp(eta_post[s,k]))
+    post_tab_2[s,k] = rbernoulli(1,pi_post[s,k])
+  }
+}
+
+
+## A more efficient way to implement it
+
+#eta_ss<-(gamma_ss*beta_ss)%*%t(x_star) #5000 x 125
+#pi_ss<-exp(eta_ss)/(1+exp(eta_ss)) #5000 x 125
+
+#post_tab = matrix(NA, nrow = 5000, ncol = 125)
+
+#for(i in 1:nrow(post_tab)){
+#  for(j in 1:ncol(post_tab)){
+#    post_tab[i,j] = rbernoulli(1,pi_ss[i,j])
+#  }
+#}
+
+```
+
+As output we obtain a BMA sample from the predictive distribution Y for each subject j.
+
+We can now evaluate how good is our model in prediction, comparing our prediction posterior mode  with the true values contained in `y_test`
+
+```{r warning=FALSE}
+post_mod_ss_2 = apply(post_tab_2, 2, getmode)
+post_mod_ss_2 = ifelse(post_mod_ss_2 == TRUE, 1,  0)
+
+confmat_ss_2<-table(post_mod_ss_2,y_test)
+accuracy = (confmat_ss_2[1,1]+confmat_ss_2[2,2])/length(y_test)
+sensitivity = confmat_ss_2[1,1]/(confmat_ss_2[1,1]+confmat_ss_2[1,2])
+specificity = confmat_ss_2[2,2]/(confmat_ss_2[2,2]+confmat_ss_2[2,1])
+
+
+cfm2 <- as_tibble(confmat_ss_2)
+plot_confusion_matrix(cfm2, 
+                      target_col = "post_mod_ss_2", 
+                      prediction_col = "y_test",
+                      counts_col = "n")
+```
+
+We obtained:
+ 
+* Overall accuracy: $\approx86\%$
+* Sensitivity: $\approx87\%$
+* Specificity: $\approx86\%$
+
+And comparing this results with the ones obtained performing prediction with the model with all variables included, we can state that thanks to spike and slab variable selection and BMA, we obtained an improvement in our prediction, especially in terms of specificity which raised to $\approx86.6\%$   
+
+
+# Beta regression
+
+
+We also decided to model the original chance of being admitted, using a Beta regression.
+
+The beta regression models are used to model variables that assume values in the interval (0, 1). They're based on the assumption that the response is beta-distributed and that its mean is related to a set of regressors through a linear predictor and a link function. The model also includes a precision parameter on which we to put a prior^[[Beta Regression in R - Francisco Cribari-Neto, Achim Zeileis](https://www.jstatsoft.org/article/view/v034i02)].
+
+
+Since we assume that $Y_i \sim Beta(a,b)$ we need to re-parameterize $a$ and $b$ to be function of the mean $\mu$ and the precision $\phi$. We proceed by letting:
+
+$$a = \mu \ \phi \\
+b= (1-\mu)\phi$$
+ 
+This parameterizazion holds and we can demonstrate it, since:
+$$\phi=\frac{a}{\mu}\\
+b=(1-\mu)\frac{a}{\mu}\\
+b=\frac{a}{\mu}  -  \frac{a\mu}{\mu} \\
+b=\frac{a}{\mu} - a \ \ \ ; \ \ \ 
+a+b=\frac{a}{\mu} \\
+\mu=\frac{a}{a+b}$$
+
+Now by replacing $\mu$, we can solve for $\phi$, so we have that:
+$$a=\bigg(\frac{a}{a+b} \bigg) \ \phi \\
+a=\frac{a\phi}{a+b}   \\
+(a+b)a=a\phi \ \ ; \ \ a^2+ba = a\phi \\
+\phi = a+b$$
+
+
+So we end with:
+
+- Shape 1 = $a$ = $\mu\phi$
+- Shape 2 = $b$ = $(1-\mu)\phi$
+
+
+ We will create a linear model for $\mu$, while for $\phi$ we put a weakly informative Gamma prior, since we need the parameter to be >0.
+ 
+To visualize how this new parameterization holds (i.e the distribution does not change) we can plot together some density beta distributions with the two different parameterization:
+
+```{r plot parameterizations, echo=FALSE, message=FALSE, warning=FALSE}
+library(extraDistr)
+library(ggplot2)
+library(R2jags)
+library(gridExtra)
+
+beta_shapes <- ggplot() +
+
+  geom_function(fun = dbeta, args = list(shape1 = 60, shape2 = 40),
+                aes(color = "dbeta(shape1 = 60, shape2 = 40)"),
+                size = 1) +
+
+  geom_function(fun = dbeta, args = list(shape1 = 2, shape2 = 11),
+                aes(color = "dbeta(shape1 = 2, shape2 = 11)"),
+                size = 1) +
+  scale_color_viridis_d(option = "plasma", end = 0.8, name = "",
+                        guide = guide_legend(ncol = 1)) +
+  labs(title = "Shape-based") +
+  
+  theme(legend.position = "bottom")
+
+beta_mu_phi <- ggplot() +
+  geom_function(fun = dprop, args = list(mean = 0.6, size = 100),
+                aes(color = "(mean = 0.6, phi = 100)"),
+                size = 1) +
+  geom_function(fun = dprop, args = list(mean = 0.154, size = 13),
+                aes(color = "(mean = 0.154, phi = 13)"),
+                size = 1) +
+  scale_color_viridis_d(option = "plasma", end = 0.8, name = "",
+                        guide = guide_legend(ncol = 1)) +
+  labs(title = "Mean- and precision-based") +
+  
+  theme(legend.position = "bottom")
+
+grid.arrange(beta_shapes ,beta_mu_phi,ncol=2)
+```
+
+
+
+The linear model for $g(\mu)$ will be:
+$$g(\mu)=\eta=\boldsymbol{\beta}^Tx_i $$
+ and we decided to use, as in logistic, a logit link function:
+ $$logit(\mu)=log\bigg(\frac{\mu}{1-\mu} \bigg)=\beta^Tx_i $$
+$$\mu=h(\beta^Tx_i)=\frac{e^{\beta^T x_i}}{1+e^{\beta^T x_i}} $$
+ 
+ As we said, to obtain the parameters of the Beta we need also $\phi$, on which we put a Gamma pior:
+ $$\phi \sim Gamma(\delta,\tau)$$
+ 
+ The likelihood of $Y_i|a_i,b_i \ \stackrel{ind.}{\sim}Beta(a_i,b_i)$ is:
+ 
+ $$p (\boldsymbol{y}|\beta)=\prod^n_{i=1}p(y_i|a_i,b_i)=\\
+ \prod^n_{i=1}p(y_i|\mu_i\phi,(1-\mu_i)\phi)=\\
+ =\prod^n_{i=1}\frac{\Gamma(\phi)}{\Gamma(\mu_i\phi)\Gamma((1-\mu_i)\phi)}  \ y_i^{\mu_i\phi-1} + (1-y_i)^{(1-\mu_i)\phi-1}$$
+ 
+ Which is a function of $\beta$ since $\mu_i$ comes from $\mu_i=h(\beta^Tx_i)$.
+ 
+ As usual, we have a prior on $\beta$:
+ $$\beta_j \stackrel{ind}{\sim} N(\beta_{0j}, \sigma^2_{0j})$$
+
+
+
+```{r}
+data<-read.csv("admission_data.csv")
+
+data$University.Rating<-factor(data$University.Rating)
+n<-nrow(data)
+set.seed(420)
+idx_train<-sample(1:n,0.75*n)
+
+x_train1<-data[idx_train,-8]
+y_train<-data[idx_train,8]
+
+x_train<-model.matrix(y_train ~., x_train1)
+
+x_test1<-data[-idx_train,-8]
+y_test<-data[-idx_train,8]
+
+p<-ncol(x_train)
+
+```
+
+We implemented a Metropolis-Hastings algorithm using JAGS with:
+
+* $\boldsymbol{\beta} \stackrel{ind}{\sim} dN(0,0.001)$
+* $\phi \sim dGamma(0.01,0.01)$
+ 
+ We decided to be weakly informative and let the model "learn" from the data as much as possible.
+
+```{r}
+jags_data = with(data, list(y = y_train, X = x_train, n = length(y_train), p = p))
+
+# Likelihood and priors
+beta_regr_jags=function(){
+  for( i in 1:n ){
+    y[i] ~ dbeta( a[i], b[i] )
+    
+    a[i] <- mu[i] * phi
+    b[i] <- ( 1 - mu[i] ) * phi
+    
+    logit( mu[i] ) <- beta%*%X[i,]
+    
+  }
+  
+  for( j in 1:p ){
+    beta[j] ~ dnorm(0, 0.001)
+  }
+
+  phi ~ dgamma(0.01,0.01)
+  
+}
+
+
+# Initial values 
+init_values = function(){
+  
+  list(beta = rep(0, p))
+  
+}
+
+# Parameter of interest for posterior inference
+params = c("beta","phi")
+
+# JAGS function
+jags_posterior = jags(data = jags_data,
+                      inits=init_values,
+                      parameters.to.save = params,
+                      model.file = beta_regr_jags,
+                      n.chains = 1,
+                      n.iter = 5000,
+                      n.burnin = 0,
+                      n.thin = 1,
+                      quiet=T,
+                      progress.bar = "none")
+
+out = jags_posterior$BUGSoutput
+
+# ---- Store Results of JAGS ----
+
+beta_post<-out$sims.list$beta
+phi_post<-out$sims.list$phi
+```
+
+## MCMC Diagnostic
+
+### Traceplots
+
+```{r}
+
+par(mfrow=c(3,2),mar = c(3,5,1,1))
+for (i in 1:6){
+plot(beta_post[,i], ylab = lbs[i], xlab = "s", type = "l",col="#30609C")}
+
+```
+
+```{r}
+par(mfrow=c(3,2),mar = c(3,5,1,1))
+for (i in 7:11){
+plot(beta_post[,i], ylab = lbs[i], xlab = "s", type = "l",col="#30609C")}
+plot(phi_post, ylab = expression(phi), xlab = "s", type = "l",col="#30609C")
+
+
+```
+
+
+
+### Autocorrelation
+
+```{r}
+par(mfrow=c(3,2),mar = c(3,5,1,1))
+for(i in 1:6){
+ acf(beta_post[,i],ylab =lbs[i], xlab = "lag", main = "")
+}
+
+par(mfrow=c(3,2),mar = c(3,5,1,1))
+for(i in 7:11){
+ acf(beta_post[,i],ylab=lbs[i], xlab = "lag", main = "")
+}
+acf(phi_post,ylab=expression(phi),xlab="lag",main="")
+```
+
+In the graphical checks we didn't find unusual pattern and the convergence near the mode is reached early, so we don't need to make thinning or to set a burn-in period.
+
+Now let's see if the diagnostic tests show problems:
+
+### Geweke test
+
+```{r}
+gew_beta<-geweke.diag(beta_post) 
+
+beta_names<-NULL
+for(i in 1:p){beta_names[i]<-paste("$\\beta_{",i,"}$")}
+
+gewz_b<-as.numeric(gew_beta$z)
+gewz_b<-round(gewz_b,2)
+
+kable(t(gewz_b),col.names = beta_names,booktabs = TRUE) %>% 
+  kable_styling(font_size=12)
+
+```
+
+### Effective Sample Size
+
+```{r}
+tabess_b<-round(effectiveSize(beta_post),1)
+tabess_b<-as.numeric(tabess_b)
+
+kable(t(tabess_b),col.names = beta_names,booktabs = TRUE) %>% 
+  kable_styling(font_size=12)
+```
+
+
+Then, to visualize how posterior values of the parameters are distributed we can use boxplots:
+
+```{r}
+betadf_b<-data.frame(beta_post)
+m2<-melt(betadf_b[,-1],id.vars=1)
+
+int_boxplot_b<-ggplot(betadf_b,aes(y = betadf_b[,1])) + 
+  geom_boxplot() + labs(x=lbs[1],y="")  + ylim(-10,0) + theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank())
+
+other_boxplot_b<-ggplot(m2,aes(x = variable,y = value)) + 
+  geom_boxplot() + 
+  scale_x_discrete(labels=lbs[2:11]) + labs(x="",y="") +
+  geom_hline(yintercept = 0,col="#30609C")
+
+grid.arrange(int_boxplot_b,other_boxplot_b,ncol=2,widths=1:2)
+
+```
+
+
+We split the intercept from the others parameters to see them better (due to the different scales).
+
+Now we can use these results for predictions.
+
+
+## Predictions
+
+After creating the model, we used the posterior distribution of Beta parameters to approximate the posterior predictive distribution of $y^*$ based on the test observations $x^*$ after the split we made before. 
+
+Since in the vector ```y_test ``` we have the original chances of admission, we can compare them with our prediction in order to evaluate the predictive performance of the model.
+
+To approximate the posterior predictive distribution of $Y$:
+
+For s = 1,...S:
+
+*    For j = 1,....,125:
+     1. Compute $\eta_j ^{(s)} = \boldsymbol\beta^{(s)T}\boldsymbol{x}^*_j$
+     2. Compute $\mu_j ^{(s)} = h(\boldsymbol\beta^{(s)T}\boldsymbol{x}^*_j)$
+     3. Compute the parameters $a_j^{(s)}=\mu_j^{(s)}\phi_j^{(s)}$
+     3. Compute the parameters $b_j^{(s)}=(1-\mu_j^{(s)})\phi_j^{(s)}$
+     4. Draw a $y^{*(s)}_j\sim Beta(a_j^{(s)},b_j^{(s)})$
+
+
+
+```{r}
+x_star<-model.matrix(y_test~.,x_test1)
+
+
+eta<-beta_post%*%t(x_star) #5000 x 125 --> each columns has 5000 much for each of the 125 obs.i
+
+mu<-exp(eta)/(1+exp(eta)) #we predict logit(mu), now we have mu
+
+phi<-out$sims.list$phi
+
+a_star<-matrix(NA,5000,125)
+b_star<-matrix(NA,5000,125)
+
+y_star<-matrix(NA,5000,125)
+
+S<-dim(beta_post)[1]
+n_star<-length(y_test)
+
+for(s in 1:S){
+  for(i in 1:n_star){
+    a_star[s,i]<-mu[s,i]*phi[s]
+    b_star[s,i]<-(1-mu[s,i])*phi[s]
+    y_star[s,i]<-rbeta(1,a_star[s,i],b_star[s,i])
+  }
+}
+```
+
+Now we can compute the mode of the 125 predictive posterior distribution $(y^*_1,...y_{125}^*) \sim (a_j,b_j)$ and then compare it with the observed values from ```y_test ```.
+
+```{r message=FALSE, warning=FALSE}
+mode_y_star<-apply(y_star,2,mlv)
+
+plot(mode_y_star,y_test,xlab = "Mo(y*)",ylab="Observed y-test")
+abline(0,1)
+
+mse_b<-mean((mode_y_star-y_test)^2)
+```
+We can also calculate the MSE, which is $\approx 0.004$
+
+## Spike & Slab Variable Selection
+
+To perform variable selection in our Beta regression we used a spike & slab prior as in the logistic case. Also here we assigned a prior to $\boldsymbol\gamma$:
+$$\gamma_j\stackrel{i.i.d.}{\sim}Ber(w)$$
+and the usual prior to $\boldsymbol{\beta}$:
+$$\beta_j\stackrel{ind}{\sim}N(\beta_0,\sigma^2_{0j})$$
+
+such that their joint prior will be the "spike & slab" prior.
+
+We assigned also a prior on the parameter $w$ of the Bernoulli distribution of $\gamma$.
+
+To be non informative, we assigned $$w \sim Beta(1,1) $$
+
+
+```{r}
+# same data
+
+jags_data_ss = with(data, list(y = y_train, X = x_train, n = length(y_train), p = p))
+
+beta_ss_regr_jags=function(){
+  for( i in 1:n ){
+    y[i] ~ dbeta( a[i], b[i] )
+    
+    a[i] <- mu[i] * phi
+    b[i] <- ( 1 - mu[i] ) * phi
+    
+    logit( mu[i] ) <- (gamma*beta)%*%X[i,]
+    
+  }
+  
+  for( j in 1:p ){
+    gamma[j] ~ dbern(w)
+    beta[j] ~ dnorm(0, 0.001)
+  }
+  
+  w ~ dbeta(1, 1)
+  
+  phi ~ dgamma(0.01,0.01)
+}
+
+
+init_values_ss = function(){
+  
+  list(beta = rep(0, p),gamma=rep(1,p))
+  
+}
+
+params_ss = c("gamma","beta","phi")
+
+jags_posterior_ss = jags(data = jags_data,
+                      parameters.to.save = params_ss,
+                      inits=init_values_ss,
+                      model.file = beta_ss_regr_jags,
+                      n.chains = 1,
+                      n.iter = 5000,
+                      n.burnin = 0,
+                      n.thin = 1,
+                      quiet=T,
+                      progress.bar = "none")
+
+out_ss = jags_posterior_ss$BUGSoutput
+
+```
+
+Barplot of the estimate of the posterior probability of inclusion for each predictor:
+
+```{r}
+gamma_ss <- out_ss$sims.list$gamma
+beta_ss <- out_ss$sims.list$beta
+phi_ss <- out_ss$sims.list$phi
+
+prob_inclusion = colMeans(gamma_ss)
+
+incldf<-data.frame(nam=param_names,probs=prob_inclusion)
+
+ggplot(data=incldf,aes(x=factor(nam,level=param_names),y=prob_inclusion,fill=""))+
+  geom_bar(stat="identity",show.legend = F) + 
+  labs(x=" ",y=expression(hat(p)[j])) +
+  scale_fill_manual(values=c("#30609C"))
+
+```
+
+
+### Bayesian Model Averaging (BMA)
+
+As we did in the logistic case, we can implement a BMA strategy, starting from the result of the Spike & Slab variable selection, to predict new values $Y^*$.
+We did it with an algorithm which is equal to the one used for predictions above, the only difference is that the linear predictor is the result of:
+$$\eta=\boldsymbol{\gamma\beta^T} \  x^* $$
+
+
+```{r message=FALSE, warning=FALSE}
+
+
+
+x_star<-model.matrix(y_test~.,x_test1)
+
+eta_ss<-(beta_ss*gamma_ss)%*%t(x_star)
+
+mu_ss<-exp(eta_ss)/(1+exp(eta_ss))
+
+a_ss<-matrix(NA,5000,125)
+b_ss<-matrix(NA,5000,125)
+
+phi_ss<-out_ss$sims.list$phi
+
+y_ss<-matrix(NA,5000,125)
+
+for(s in 1:S){
+  for(i in 1:n_star){
+    a_ss[s,i]<-mu_ss[s,i]*phi_ss[s]
+    b_ss[s,i]<-(1-mu_ss[s,i])*phi_ss[s]
+    y_ss[s,i]<-rbeta(1,a_ss[s,i],b_ss[s,i])
+    
+  }
+}
+
+post_mode_ss<-apply(y_ss,2,mlv)
+
+plot(post_mode_ss,y_test,xlab = "Mo(y*)",ylab="Observed y-test")
+abline(0,1)
+
+mse_ss<-mean((post_mode_ss-y_test)^2)
+
+
+```
+The MSE in this case is $\approx0.008$
+
+The BMA strategy didn't improve the MSE, but this is a sort of "frequentist ground" for comparison. The strength of bayesian predictions is that we obtain a distribution for the future observation, instead of a single fitted value. A better idea would be to compare the posterior predictive distribution before and after the Spike and Slab variable selection with the true value from ```y_test``` for four different students:
+
+```{r}
+
+# Subject 96
+dist_df96<-data.frame(cbind("y_ss"=y_ss[,96],"y_st"=y_star[,96]))
+
+plot96<-ggplot(dist_df96)+
+  geom_density( aes(x=y_ss,fill="BMA post pred"),color="#000000",alpha=0.4)+
+  geom_density(aes(x=y_st,fill="Post pred"), color="#000000",alpha=0.4)+
+  geom_vline(aes(xintercept=y_test[96],colour=" "),size=1)+
+  scale_color_manual("Observed value",values="black")+
+  scale_fill_manual("Legend",values=c("#2562AE","#DE151B"))+
+  labs(x="y",title="Student 96") 
+
+# Subject 6
+dist_df6<-data.frame(cbind("y_ss"=y_ss[,6],"y_st"=y_star[,6]))
+
+plot6<-ggplot(dist_df6)+
+  geom_density( aes(x=y_ss,fill="BMA post pred"),color="#000000",alpha=0.4)+
+  geom_density(aes(x=y_st,fill="Post pred"), color="#000000",alpha=0.4)+
+  geom_vline(aes(xintercept=y_test[6],colour=" "),size=1)+
+  scale_color_manual("Observed value",values="black")+
+  scale_fill_manual("Legend",values=c("#2562AE","#DE151B"))+
+  labs(x="y",title="Student 6") 
+  
+
+# Subject 42
+dist_df42<-data.frame(cbind("y_ss"=y_ss[,42],"y_st"=y_star[,42]))
+
+plot42<-ggplot(dist_df42)+
+  geom_density( aes(x=y_ss,fill="BMA post pred"),color="#000000",alpha=0.4)+
+  geom_density(aes(x=y_st,fill="Post pred"), color="#000000",alpha=0.4)+
+  geom_vline(aes(xintercept=y_test[42],colour=" "),size=1)+
+  scale_color_manual("Observed value",values="black")+
+  scale_fill_manual("Legend",values=c("#2562AE","#DE151B"))+
+  labs(x="y",title="Student 42") 
+  
+
+# Subject 78
+dist_df78<-data.frame(cbind("y_ss"=y_ss[,78],"y_st"=y_star[,78]))
+
+plot78<-ggplot(dist_df78)+
+  geom_density( aes(x=y_ss,fill="BMA post pred"),color="#000000",alpha=0.4)+
+  geom_density(aes(x=y_st,fill="Post pred"), color="#000000",alpha=0.4)+
+  geom_vline(aes(xintercept=y_test[78],colour=" "),size=1)+
+  scale_color_manual("Observed value",values="black")+
+  scale_fill_manual("Legend",values=c("#2562AE","#DE151B"))+
+  labs(x="y",title="Student 78") 
+  
+
+grid.arrange(plot96,plot6,plot42,plot78,ncol=2)
+
+
+```
+
+
+
+# Conclusion
+
+
+From the result of our analysis we can state that the logistic model we implemented performs very well, but it can tell a student only whether it has High or Low chance of being admitted. 
+While whit the beta regression model, we are able to provide to each individuals a distribution of their probability of being admit. 
+Comparing the mode of these distributions with the true value of the test dataset, the model doesn't show high precision of the prediction, but this comparison is quite limiting for a bayesian approach in which we can get a distribution for the chance of each individual instead of a fitted value.
+
+
+**Other sources**
+
+* Bayesian Modeling course, G. Consonni, F. Castelletti, Università Cattolica Del Sacro Cuore Milano
+* Apllied Linear Models course, K. Abramowicz, Università Cattolica Del Sacro Cuore Milano
+* A First Course in Bayesian Statistical Methods, Peter D. Hoff
+
+
+
